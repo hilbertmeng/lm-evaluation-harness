@@ -34,9 +34,37 @@ from lm_eval.models.utils import (
     stop_sequences_criteria,
 )
 
+import json
+import os
+import time
+
+from .configuration_dcformer import DCFormerConfig
+from .modeling_dcformer import DCFormer, match_weight
 
 eval_logger = utils.eval_logger
 
+
+def load_dcformer(step, config, device='cpu', model_size='7b', dtype=torch.float16): # 6.9b or 2.8b
+    t0 = time.time()
+    print('loading DCFormer')
+    assert model_size in ['7b']
+    assert step == 130000
+    #model_path = f'/home/lishengping/data/PileDCLlama3B2Kx4x256x1DWDDLR00032v4_checkpoint_{step:08d}.torch.bin'
+    model_path = f'/home/lishengping/mengqy/data/PileDCSlimLlama7B4Kx4x256x1v5p_checkpoint_{step:08d}.torch.bin'
+    weight_pax = torch.load(model_path)
+    #config_path = 'dcformerslim_7b.json'
+    #kwargs=dict(window_size=256,vocab_size=50432,use_qk_norm=True,norm_eps=1e-6)
+    #model = DCFormerLlama.from_name('2p8B', **kwargs)
+    model = DCFormer(config)
+    w = torch.load(model_path)
+    model = match_weight(model,w)
+    _ = model.eval()
+    _ = model.half()
+    _ = model.to(device)
+    with torch.device(device):
+        model.setup_caches(max_batch_size=1, max_seq_length=4096,set_kv_cache=False)
+    print(f'DCFormer loaded: {time.time() - t0}s')
+    return model.to(device, dtype=dtype)
 
 def _get_accelerate_args(
     device_map_option: Optional[str] = "auto",
@@ -185,11 +213,17 @@ class HFLM(TemplateLM):
             # TODO: update this to be less of a hack once subfolder is fixed in HF
             revision = revision + ("/" + subfolder if subfolder is not None else "")
 
-            self._get_config(
-                pretrained,
-                revision=revision,
-                trust_remote_code=trust_remote_code,
-            )
+            if 'DCFormerSlim' in pretrained:
+                config_path = 'dcformerslim_7b.json'
+                with open(config_path, 'r') as f:
+                    config = json.loads(f.read())
+                self._config=DCFormerConfig(**config) 
+            else:
+                self._get_config(
+                    pretrained,
+                    revision=revision,
+                    trust_remote_code=trust_remote_code,
+                )
 
         # determine which of 'causal' and 'seq2seq' backends to use
         self._get_backend(
@@ -198,20 +232,30 @@ class HFLM(TemplateLM):
 
         # if we passed `pretrained` as a string, initialize our model now
         if isinstance(pretrained, str):
-            self._create_model(
-                pretrained=pretrained,
-                revision=revision,
-                dtype=dtype,
-                trust_remote_code=trust_remote_code,
-                parallelize=parallelize,
-                device_map_option=device_map_option,
-                max_memory_per_gpu=max_memory_per_gpu,
-                max_cpu_memory=max_cpu_memory,
-                offload_folder=offload_folder,
-                peft=peft,
-                autogptq=autogptq,
-                **kwargs,
-            )
+            if 'DCFormer' in pretrained:
+                step = int(revision.replace('step', ''))
+                print('dcformer args: ', pretrained, step, dtype)
+                self._model = load_dcformer(step, self._config, device=self.device) #dtype=dtype fixed as float16
+                #self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+                #      "EleutherAI/pythia-6.9b",
+                #      revision="step3000",
+                #      cache_dir="/home/lishengping/pythia_models/step3000",
+                #    )
+            else:
+                self._create_model(
+                    pretrained=pretrained,
+                    revision=revision,
+                    dtype=dtype,
+                    trust_remote_code=trust_remote_code,
+                    parallelize=parallelize,
+                    device_map_option=device_map_option,
+                    max_memory_per_gpu=max_memory_per_gpu,
+                    max_cpu_memory=max_cpu_memory,
+                    offload_folder=offload_folder,
+                    peft=peft,
+                    autogptq=autogptq,
+                    **kwargs,
+                )
 
         # access self._model through self.model property outside this method
         if isinstance(self.model, torch.nn.Module):
@@ -231,13 +275,17 @@ class HFLM(TemplateLM):
                         "Failed to place model onto specified device. This may be because the model is quantized via `bitsandbytes` or `device_map` is provided. If the desired GPU is being used, this message is safe to ignore."
                     )
 
-        self._create_tokenizer(
-            pretrained,
-            tokenizer,
-            revision=revision,
-            trust_remote_code=trust_remote_code,
-            use_fast_tokenizer=use_fast_tokenizer,
-        )
+        if 'DCFormerSlim' in pretrained:
+            tokenizer_path = '/home/lishengping/mengqy/projects/slim_alignment/tokenizer'
+            self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True, trust_remote_code=True)
+        else:
+            self._create_tokenizer(
+                pretrained,
+                tokenizer,
+                revision=revision,
+                trust_remote_code=trust_remote_code,
+                use_fast_tokenizer=use_fast_tokenizer,
+            )
 
         self.truncation = truncation
         self.logits_cache = logits_cache
@@ -425,7 +473,7 @@ class HFLM(TemplateLM):
                 # these special cases should be treated as seq2seq models.
                 self.AUTO_MODEL_CLASS = transformers.AutoModelForSeq2SeqLM
             elif (
-                getattr(self.config, "model_type") in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+                getattr(self.config, "model_type") in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES 
             ):
                 self.AUTO_MODEL_CLASS = transformers.AutoModelForCausalLM
             else:
