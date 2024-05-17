@@ -48,7 +48,7 @@ def load_dcformer(step, config, device='cpu', model_size='7b', dtype=torch.float
     t0 = time.time()
     print('loading DCFormer')
     assert model_size in ['7b']
-    assert step == 130000
+    assert step in [130000, 150000]
     #model_path = f'/home/lishengping/data/PileDCLlama3B2Kx4x256x1DWDDLR00032v4_checkpoint_{step:08d}.torch.bin'
     model_path = f'/home/lishengping/mengqy/data/PileDCSlimLlama7B4Kx4x256x1v5p_checkpoint_{step:08d}.torch.bin'
     weight_pax = torch.load(model_path)
@@ -241,6 +241,13 @@ class HFLM(TemplateLM):
                 #      revision="step3000",
                 #      cache_dir="/home/lishengping/pythia_models/step3000",
                 #    )
+            elif 'Llama' in pretrained:
+                local_path = '/home/lishengping/mengqy/projects/llama_model/llama-7b-hf-custom'
+                print('load local llama !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+                self._model = self.AUTO_MODEL_CLASS.from_pretrained(
+                local_path,
+                torch_dtype=torch.float16,
+            )
             else:
                 self._create_model(
                     pretrained=pretrained,
@@ -298,9 +305,10 @@ class HFLM(TemplateLM):
         elif self.tokenizer.eos_token:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         else:
-            if getattr(self.config, "model_type", None) == "qwen":
+            if getattr(self.config, "model_type", None) in ["qwen", "dcformer"]:
                 # Qwen's trust_remote_code tokenizer does not allow for adding special tokens
                 self.tokenizer.pad_token = "<|endoftext|>"
+                self.tokenizer.eos_token_id = self.tokenizer.eod_id
             elif (
                 self.tokenizer.__class__.__name__ == "RWKVWorldTokenizer"
                 or self.tokenizer.__class__.__name__ == "Rwkv5Tokenizer"
@@ -720,7 +728,9 @@ class HFLM(TemplateLM):
                 add_special_tokens = True
 
         encoding = self.tokenizer.encode(string, add_special_tokens=add_special_tokens)
-
+        if getattr(self.config, "model_type", None) == 'dcformer':
+            encoding = [151646] + encoding # add bos token
+            print('add bos token done')
         # left-truncate the encoded context to be at most `left_truncate_len` tokens long
         if left_truncate_len:
             encoding = encoding[-left_truncate_len:]
@@ -996,12 +1006,14 @@ class HFLM(TemplateLM):
             # tensors, then we pack them together into a batch, call the model, and then pick it all apart
             # again because vectorizing is annoying
 
+            #print('add bos', [151646])
             for _, context_enc, continuation_enc in chunk:
                 # sanity check
                 assert len(context_enc) > 0
                 assert len(continuation_enc) > 0
                 assert len(continuation_enc) <= self.max_length
-
+                #context_enc = [151646] + context_enc 
+                #context_enc = [151646] + context_enc 
                 # how this all works (illustrated on a causal decoder-only setup):
                 #          CTX      CONT
                 # inp    0 1 2 3|4 5 6 7 8 9   <- last token is deleted by inp[:, :-1]
@@ -1012,7 +1024,7 @@ class HFLM(TemplateLM):
                 # when too long to fit in context, truncate from the left
                 if self.AUTO_MODEL_CLASS == transformers.AutoModelForCausalLM:
                     inp = torch.tensor(
-                        (context_enc + continuation_enc)[-(self.max_length + 1) :][:-1],
+                        ( context_enc + continuation_enc)[-(self.max_length + 1) :][:-1],
                         dtype=torch.long,
                         device=self.device,
                     )
