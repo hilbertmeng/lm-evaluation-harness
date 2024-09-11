@@ -48,7 +48,7 @@ def load_dcformer(step, config, device='cpu', model_size='7b', dtype=torch.float
     t0 = time.time()
     print('loading DCFormer')
     assert model_size in ['7b']
-    assert step in [130000, 150000]
+    #assert step in [130000, 150000]
     #model_path = f'/home/lishengping/data/PileDCLlama3B2Kx4x256x1DWDDLR00032v4_checkpoint_{step:08d}.torch.bin'
     model_path = f'/home/lishengping/mengqy/data/PileDCSlimLlama7B4Kx4x256x1v5p_checkpoint_{step:08d}.torch.bin'
     weight_pax = torch.load(model_path)
@@ -242,7 +242,8 @@ class HFLM(TemplateLM):
                 #      cache_dir="/home/lishengping/pythia_models/step3000",
                 #    )
             elif 'Llama' in pretrained:
-                local_path = '/home/lishengping/mengqy/projects/llama_model/llama-7b-hf-custom'
+                #local_path = '/home/lishengping/mengqy/projects/llama_model/llama-7b-hf-custom'
+                local_path = '/home/lishengping/mengqy/data/llama_model/llama-7b-hf-custom'
                 print('load local llama !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
                 self._model = self.AUTO_MODEL_CLASS.from_pretrained(
                 local_path,
@@ -730,7 +731,7 @@ class HFLM(TemplateLM):
         encoding = self.tokenizer.encode(string, add_special_tokens=add_special_tokens)
         if getattr(self.config, "model_type", None) == 'dcformer':
             encoding = [151646] + encoding # add bos token
-            print('add bos token done')
+            #print('add bos token done')
         # left-truncate the encoded context to be at most `left_truncate_len` tokens long
         if left_truncate_len:
             encoding = encoding[-left_truncate_len:]
@@ -760,6 +761,12 @@ class HFLM(TemplateLM):
             return_tensors="pt",
             add_special_tokens=add_special_tokens,
         )
+        if getattr(self.config, "model_type", None) == 'dcformer':
+            b,t = encoding["input_ids"].shape
+            encoding_withbos = torch.zeros((b,t), dtype=torch.int)
+            encoding_withbos[:,0] = 151646 # add bos token
+            encoding_withbos[:,1:] = encoding["input_ids"][:,:-1]
+            encoding["input_ids"] = encoding_withbos
         if left_truncate_len:
             encoding["input_ids"] = encoding["input_ids"][:, -left_truncate_len:]
             encoding["attention_mask"] = encoding["attention_mask"][
@@ -823,6 +830,7 @@ class HFLM(TemplateLM):
         stopping_criteria = stop_sequences_criteria(
             self.tokenizer, stop, context.shape[1], context.shape[0]
         )
+        print('generation_kwargs',generation_kwargs)
         return self.model.generate(
             input_ids=context,
             max_length=max_length,
