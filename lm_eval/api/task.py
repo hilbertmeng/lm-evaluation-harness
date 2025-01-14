@@ -868,6 +868,9 @@ class ConfigurableTask(Task):
                     )
 
     def download(self, dataset_kwargs: Optional[Dict[str, Any]] = None) -> None:
+
+        if dataset_kwargs is None: dataset_kwargs = {}
+        dataset_kwargs['trust_remote_code']=True
         self.dataset = datasets.load_dataset(
             path=self.DATASET_PATH,
             name=self.DATASET_NAME,

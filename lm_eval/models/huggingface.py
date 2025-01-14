@@ -40,6 +40,8 @@ import time
 
 from .configuration_dcformer import DCFormerConfig
 from .modeling_dcformer import DCFormer, match_weight
+from .modeling_muddpythia import match_weight_dynamicdense, MUDDPythiaConfig,MUDDPythia
+from .modeling_muddformer import match_weight_muddformer, MUDDFormerConfig, MUDDFormer
 
 eval_logger = utils.eval_logger
 
@@ -65,6 +67,27 @@ def load_dcformer(step, config, device='cpu', model_size='7b', dtype=torch.float
         model.setup_caches(max_batch_size=1, max_seq_length=4096,set_kv_cache=False)
     print(f'DCFormer loaded: {time.time() - t0}s')
     return model.to(device, dtype=dtype)
+
+def load_mudd(model_name, step, model_size, config, device='cpu', dtype=torch.bfloat16):
+    model = MUDDPythia(config) if model_name == 'MUDDPythia' else MUDDFormer(config) 
+    # load pax model weight
+    #assert step == 13500
+    #w = torch.load('/home/lishengping/data/PileMUDDPythiaMediumx6p7BTokenFixLastFixParallelv5p_13500.torch.bin')
+    assert model_size in ['1.4B', '2.8B'] 
+    size_str = '3B' if model_size == '2.8B' else 'XL'
+    if model_name == 'MUDDPythia':
+        w = torch.load(f'/home/lishengping/mengqy/data/PileMUDDPythia{size_str}PlusOcdbtv6e_{step}.torch.bin')
+        model = match_weight_dynamicdense(model, w, strict=True)
+    elif model_name == 'MUDDFormer':
+        w = torch.load(f'/home/lishengping/mengqy/data/PileMUDDLlama{size_str}PlusOcdbtContv6e_{step}.torch.bin')
+        model = match_weight_muddformer(model, w, strict=True)
+    _ = model.eval()
+    dtype = torch.bfloat16
+    _ = model.to(device, dtype=dtype)
+    with torch.device(device):
+        model.setup_caches(max_batch_size=1, max_seq_length=2048, dtype=dtype)
+    #_ = model.to(device)
+    return model#.to(device, dtype=dtype)
 
 def _get_accelerate_args(
     device_map_option: Optional[str] = "auto",
@@ -218,6 +241,42 @@ class HFLM(TemplateLM):
                 with open(config_path, 'r') as f:
                     config = json.loads(f.read())
                 self._config=DCFormerConfig(**config) 
+            elif 'MUDD' in pretrained:
+                print('pretrained', pretrained)
+                model_name = pretrained.split('-')[0]
+                assert model_name in ['MUDDPythia', 'MUDDFormer']
+                if model_name =='MUDDPythia':
+                    config_path = 'config_muddpythia.json'
+                    model_size = pretrained.split('Pythia-')[-1][:4] # x.xB
+                elif model_name =='MUDDFormer':
+                    config_path = 'config_muddformer.json'
+                    model_size = pretrained.split('Former-')[-1][:4] # x.xB
+                with open(config_path, 'r') as f:
+                    config = json.loads(f.read())
+                if model_size == '0.4B':
+                    config['dim'] = 1024
+                    config['intermediate_size'] = 4096 
+                    config['head_dim'] = 64 
+                    config['n_local_heads'] = 16 
+                    config['n_head'] = 16 
+                    config['n_layer'] = 24 
+                elif model_size == '1.4B':
+                    config['dim'] = 2048 
+                    config['intermediate_size'] = 8192 
+                    config['head_dim'] = 128 
+                    config['n_local_heads'] = 16 
+                    config['n_head'] = 16 
+                    config['n_layer'] = 24 
+                    config["use_qk_norm"] = True
+                elif model_size == '2.8B':
+                    config['dim'] = 2560 
+                    config['intermediate_size'] = 10240 if 'MUDDPythia' in pretrained else 6912
+                    config['head_dim'] = 80 
+                    config['n_local_heads'] = 32 
+                    config['n_head'] = 32 
+                    config['n_layer'] = 32
+                    config["use_qk_norm"] = True
+                self._config= MUDDPythiaConfig(**config) if model_name=='MUDDPythia' else MUDDFormerConfig(**config)
             else:
                 self._get_config(
                     pretrained,
@@ -241,6 +300,13 @@ class HFLM(TemplateLM):
                 #      revision="step3000",
                 #      cache_dir="/home/lishengping/pythia_models/step3000",
                 #    )
+            elif 'MUDD' in pretrained:
+                print('revision', revision)
+                model_name = pretrained.split('-')[0]
+                model_size = pretrained.split(f'{model_name}-')[-1][:4] # x.xB
+                step = int(revision.replace('step', ''))
+                print('muddpythia args: ', pretrained, step, dtype)
+                self._model = load_mudd(model_name, step, model_size, self._config, device=self.device) #dtype=dtype fixed as float16
             elif 'Llama' in pretrained:
                 #local_path = '/home/lishengping/mengqy/projects/llama_model/llama-7b-hf-custom'
                 local_path = '/home/lishengping/mengqy/data/llama_model/llama-7b-hf-custom'
@@ -286,6 +352,8 @@ class HFLM(TemplateLM):
         if 'DCFormerSlim' in pretrained:
             tokenizer_path = '/home/lishengping/mengqy/projects/slim_alignment/tokenizer'
             self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True, trust_remote_code=True)
+        elif 'MUDD' in pretrained:
+            self.tokenizer = transformers.AutoTokenizer.from_pretrained("EleutherAI/pythia-6.9b")
         else:
             self._create_tokenizer(
                 pretrained,
