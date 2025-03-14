@@ -51,7 +51,12 @@ lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba2-2.7b,dtype
 #task="arc_challenge"; shot="15"; metric="acc_norm"
 #task="truthfulqa_mc2"; shot="0"; metric="acc"
 
-#DCFormer
+# DCFormerMoe
+model="DCFormerMoe"; revision="latest"
+task="arc_challenge"; shot="25"; metric="acc_norm"
+device="cuda:0"
+lm_eval --model hf --model_args pretrained=${model},revision=${revision},dtype=bfloat16 --tasks $task --device $device --batch_size 1 --num_fewshot $shot --output_path results/${model}_${revision}_${task}_${shot}shot_tmp  2>&1 |tee logs/${model}_${revision}_${task}_${shot}shot_tmp.log.fp16
+
 #lm_eval --model hf --model_args pretrained=${model},revision=${revision},dtype=float16 --tasks $task --device $device --batch_size 1 --num_fewshot $shot --output_path results/${model}_${revision}_${task}_${shot}shot_tmp >logs/${model}_${revision}_${task}_${shot}shot_tmp.log 2>&1
 
 # Qwen

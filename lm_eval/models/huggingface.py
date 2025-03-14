@@ -68,6 +68,30 @@ def load_dcformer(step, config, device='cpu', model_size='7b', dtype=torch.float
     print(f'DCFormer loaded: {time.time() - t0}s')
     return model.to(device, dtype=dtype)
 
+# lsp
+def load_dcformer_moe(checkpoint_path: str, max_batch_size=1, dtype=torch.float16, device='cpu', moe=True):
+    '''加载dcformer模型'''
+    assert os.path.isdir(checkpoint_path), print(f'checkpoint_path: {checkpoint_path}')
+    if moe:
+        from .modeling_dcformer_moe import DCFormer as dc_moe
+        dcformer = dc_moe.from_pretrained(checkpoint_path, trust_remote_code=False, device_map=device, torch_dtype=dtype)
+    else:
+        from modeling_dcformer import DCFormer as dc_dense
+        dcformer = dc_dense.from_pretrained(checkpoint_path, trust_remote_code=False, device_map=device, torch_dtype=dtype)
+
+    _ = dcformer.eval()
+    _ = dcformer.to(dtype)
+    _ = dcformer.to(device)
+    
+    for k, v in dcformer.named_parameters():
+        print(k, v.shape, v.dtype)
+
+    print('setup cache')
+    with torch.device(dcformer.device):
+        dcformer.setup_caches(max_batch_size=max_batch_size, set_kv_cache=True)
+    return dcformer
+
+    
 def load_mudd(model_name, step, model_size, config, device='cpu', dtype=torch.bfloat16):
     model = MUDDPythia(config) if model_name == 'MUDDPythia' else MUDDFormer(config) 
     # load pax model weight
@@ -163,6 +187,7 @@ class HFLM(TemplateLM):
         **kwargs,
     ) -> None:
         super().__init__()
+        self.pretrained = pretrained # lsp
 
         # optionally: take in an already-initialized transformers.PreTrainedModel
         if not isinstance(pretrained, str):
@@ -240,7 +265,13 @@ class HFLM(TemplateLM):
                 config_path = 'dcformerslim_7b.json'
                 with open(config_path, 'r') as f:
                     config = json.loads(f.read())
-                self._config=DCFormerConfig(**config) 
+                self._config=DCFormerConfig(**config)
+            if 'DCFormerMoe' in pretrained: # lsp
+                config_path = '/data0/lishengping/models/v4moe_s151050/config.json'
+                print(f'Load DCFormerMoe model config. Path: {config_path}')
+                with open(config_path, 'r') as f:
+                    config = json.loads(f.read())
+                self._config=DCFormerConfig(**config)
             elif 'MUDD' in pretrained:
                 print('pretrained', pretrained)
                 model_name = pretrained.split('-')[0]
@@ -291,7 +322,11 @@ class HFLM(TemplateLM):
 
         # if we passed `pretrained` as a string, initialize our model now
         if isinstance(pretrained, str):
-            if 'DCFormer' in pretrained:
+            if 'DCFormerMoe' in pretrained:
+                checkpoint_path = '/data0/lishengping/models/v4moe_s151050'
+                self._model = load_dcformer_moe(checkpoint_path, max_batch_size=1, device=self.device, moe=True) #dtype=dtype fixed as float16
+
+            elif 'DCFormer' in pretrained:
                 step = int(revision.replace('step', ''))
                 print('dcformer args: ', pretrained, step, dtype)
                 self._model = load_dcformer(step, self._config, device=self.device) #dtype=dtype fixed as float16
@@ -351,6 +386,10 @@ class HFLM(TemplateLM):
 
         if 'DCFormerSlim' in pretrained:
             tokenizer_path = '/home/lishengping/mengqy/projects/slim_alignment/tokenizer'
+            self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True, trust_remote_code=True)
+        if 'DCFormerMoe' in pretrained: # lsp
+            tokenizer_path = '/home/lishengping/projects/lm-evaluation-harness/lm_eval/models/tokenizer'
+            print(f'DCFormerMoe tokenizer_path: {tokenizer_path}')
             self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True, trust_remote_code=True)
         elif 'MUDD' in pretrained:
             self.tokenizer = transformers.AutoTokenizer.from_pretrained("EleutherAI/pythia-6.9b")
@@ -798,7 +837,7 @@ class HFLM(TemplateLM):
 
         encoding = self.tokenizer.encode(string, add_special_tokens=add_special_tokens)
         if getattr(self.config, "model_type", None) == 'dcformer':
-            encoding = [151646] + encoding # add bos token
+            encoding = [151646] + encoding # add bos token # mqy, |<extra_0|>
             #print('add bos token done')
         # left-truncate the encoded context to be at most `left_truncate_len` tokens long
         if left_truncate_len:
@@ -878,6 +917,12 @@ class HFLM(TemplateLM):
                 ).logits
             else:
                 assert self.AUTO_MODEL_CLASS == transformers.AutoModelForCausalLM
+            # batched_inps： b * max_len_in_batch
+            if 'DCFormerMoe' in self.pretrained: # lsp
+                input_pos = torch.arange(inps.shape[1], device=inps.device, dtype=inps.dtype).unsqueeze(0)
+                batch_indexes = torch.tensor(list(range(inps.shape[0])), device=inps.device)
+                return self.model(inps, input_pos, batch_indexes=batch_indexes).logits
+            else:
                 return self.model(inps).logits
 
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
@@ -1165,6 +1210,8 @@ class HFLM(TemplateLM):
                     "labels": batched_conts,
                 }
 
+               
+ #           __import__('ipdb').set_trace()
             multi_logits = F.log_softmax(
                 self._model_call(batched_inps, **call_kwargs), dim=-1
             )  # [batch, padding_length (inp or cont), vocab]
