@@ -80,7 +80,7 @@ def load_dcformer_moe(checkpoint_path: str, max_batch_size=1, dtype=torch.float1
         dcformer = dc_dense.from_pretrained(checkpoint_path, trust_remote_code=False, device_map=device, torch_dtype=dtype)
 
     _ = dcformer.eval()
-    _ = dcformer.to(dtype)
+    dcformer = dcformer.to(dtype)
     _ = dcformer.to(device)
     
     for k, v in dcformer.named_parameters():
